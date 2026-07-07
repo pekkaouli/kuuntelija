@@ -1,0 +1,22 @@
+# Audiotiedostot eivät kuulu repoon
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.ogg
+*.aiff
+*.opus
+
+# Skriptin tuottamat raportit (syntyvät audioista)
+*.txt
+
+# Isot mallitiedostot — latauslinkit README:ssä
+mallit/
+
+# Python
+.venv/
+__pycache__/
+
+# macOS
+.DS_Store
+.claude/
