@@ -18,9 +18,9 @@ TYOTILA=/scratch/${SLURM_JOB_ACCOUNT}/kuuntelija
 KANSIO=${1:-$TYOTILA/musiikki}
 
 module purge
-module load pytorch
+module load pytorch ffmpeg
 
-export PATH="$TYOTILA/llama.cpp/build/bin:$TYOTILA/bin:$PATH"
+export PATH="$TYOTILA/llama.cpp/build/bin:$PATH"
 export HF_HOME=$TYOTILA/hf-cache
 # V100:ssa (32 Gt) koko malli mahtuu näytönohjaimeen
 export KUUNTELIJA_CPU_MOE=0
