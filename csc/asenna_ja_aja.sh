@@ -126,7 +126,9 @@ log "5/6  Musiikki Allaksesta ($BUCKET → musiikki/)"
 mkdir -p musiikki
 command -v rclone &>/dev/null || module load allas 2>/dev/null
 if command -v rclone &>/dev/null && rclone lsd "s3allas-$PROJEKTI:" &>/dev/null; then
-    rclone copy "s3allas-$PROJEKTI:$BUCKET" musiikki -P || warn "rclone-kopiointi ei täysin onnistunut"
+    # --ignore-checksum: Allas S3:n ETag ei ole tiedoston puhdas MD5, joten
+    # rclonen oletus-checksumtarkistus luulee ehjiä tiedostoja korruptoituneiksi.
+    rclone copy "s3allas-$PROJEKTI:$BUCKET" musiikki -P --ignore-checksum || warn "rclone-kopiointi ei täysin onnistunut"
 else
     warn "rclone-remotea 's3allas-$PROJEKTI' ei löydy — konfiguroi se MyCSC:n"
     warn "Cloud storage -paneelista, tai kopioi biisit käsin kansioon musiikki/"
