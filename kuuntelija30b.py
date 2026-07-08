@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-kuuntelija.py — kuuntelee kansion audiotiedostot paikallisilla malleilla ja
-kirjoittaa jokaisesta kuvauksen samannimiseen .txt-tiedostoon.
+kuuntelija30b.py — tehokoneen kuuntelija: sama putki kuin kuuntelija.py:ssä,
+mutta kuvailun tekee Qwen3-Omni-30B-A3B, joka kuulee koko biisin ja
+kirjoittaa proosaa. Vaatii n. 32 Gt RAM; hyötyy näytönohjaimesta
+(ks. README:n Optimointi-osio).
 
 Vaiheet per biisi:
   1. ffmpeg poimii biisistä näytepätkät
-  2. Qwen2.5-Omni (llama.cpp) kuuntelee 30 s pätkän ja kirjoittaa
-     yksityiskohtaisen kuvauksen (genre, soittimet, komppi, laulu, sovitus)
+  2. Qwen3-Omni-30B (llama.cpp) kuuntelee koko biisin ja kirjoittaa siitä
+     proosamuotoisen kuvauksen (genre, tunnelma, soittimet, laulu, sovituksen
+     kaari intro→säkeistö→kertosäe→outro)
   3. GTZAN-genremalli ja AudioSet-tagimalli antavat vertailuarvion
   4. librosa mittaa tempon, sävellajin ja energian — nämä liitetään
      kuvauksen perään, koska audio-LLM arvaa ne huonosti
   5. valinnaisesti (--suomi) Ollama-kielimalli kirjoittaa kuvauksen suomeksi
 
 Käyttö:
-  .venv/bin/python kuuntelija.py [kansio] [--suomi] [--force]
+  .venv/bin/python kuuntelija30b.py [kansio] [--suomi] [--force]
 """
 
 import argparse
@@ -35,23 +38,34 @@ NAYTE_SEKUNNIT = 12
 SR = 16000
 
 MALLIKANSIO = Path(__file__).resolve().parent / "mallit"
-QWEN_MALLI = MALLIKANSIO / "Qwen2.5-Omni-7B-Q4_K_M.gguf"
-# mmproj f16, ei Q8: kvantisoitu audioenkooderi pilaa musiikin kuuntelun
-QWEN_MMPROJ = MALLIKANSIO / "mmproj-Qwen2.5-Omni-7B-f16.gguf"
-QWEN_NAYTE_SEKUNNIT = 30  # Qwenin audioenkooderi kuulee enintään 30 s
+QWEN_MALLI = MALLIKANSIO / "Qwen3-Omni-30B-A3B-Instruct-Q4_K_M.gguf"
+# mmproj bf16, ei Q8: kvantisoitu audioenkooderi pilaa musiikin kuuntelun
+QWEN_MMPROJ = MALLIKANSIO / "mmproj-Qwen3-Omni-30B-A3B-Instruct-bf16.gguf"
+# Koko biisi annetaan mallille, mutta pisimmistä otetaan keskeltä tämän
+# verran sekunteja, ettei audioenkooderin konteksti kasva liian isoksi.
+QWEN_MAX_SEKUNNIT = 300
+# MoE-jako: kaikki kerrokset GPU:lle (-ngl 99), mutta ensimmäisten
+# QWEN_CPU_MOE kerroksen experttipainot jäävät RAMiin (--n-cpu-moe).
+# Mitattu RTX 5070 Ti:llä (12 Gt): 30/48 mahtuu juuri ja koko biisi
+# analysoituu 44 sekunnissa; 24/48 kaatuu muistin loppumiseen. 32 jättää
+# pelivaraa muille ohjelmille. Pelkkä CPU (-ngl 0) veisi 97 s.
+QWEN_GPU_KERROKSET = 99
+QWEN_CPU_MOE = 32
+QWEN_KONTEKSTI = 8192  # riittää 5 min audiolle + kehotteelle + vastaukselle
 
-# Genren nimeäminen on Qwenin heikkous, joten luokittelijoiden arvio
-# annetaan vihjeeksi; soittimet, kompin ja laulun se kuulee itse.
+# Prosessimuotoinen arvostelukehote tuottaa ihmismäisempää tekstiä kuin
+# tageja luetteleva prompt, ja koko biisin kuuntelu tuo mukaan rakenteen.
+# Genren nimeäminen annetaan silti luokittelijoiden vihjeenä varmuudeksi.
 QWEN_KEHOTE = (
-    "You are listening to an excerpt of a song. Describe it in detail for "
-    "a music production prompt. Cover: genre and subgenre influences; the "
-    "instruments and what they play (riffs, chords, patterns) and their "
-    "tone; the drum pattern and cymbal work; the bass line; the vocals "
-    "(gender, range, delivery style); the overall arrangement. Format: one "
-    "paragraph of short comma-separated clauses, no full sentences, like a "
-    "prompt for a music generation model. Do not guess tempo or key. "
-    "A rough genre classifier suggested: {vihjeet} — it may be wrong, "
-    "trust what you hear."
+    "You are a music critic listening to this song for the first time. "
+    "Write a natural, flowing description in prose of what you hear: the "
+    "genre and mood; the instruments and how they interact; the vocal "
+    "performance (gender, range, delivery); and how the arrangement "
+    "develops over the course of the song (intro, verses, chorus, bridge, "
+    "outro). Write engaging, human prose, like a review — not a list of "
+    "tags or keywords. Two to three short paragraphs. Do not guess tempo "
+    "or key. A rough genre classifier suggested: {vihjeet} — it may be "
+    "wrong, trust what you hear."
 )
 
 # AudioSetin ylägeneeriset luokat, jotka eivät kerro biisistä mitään
@@ -70,7 +84,6 @@ MOLLI_PROFIILI = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98,
 
 
 def aja(komento):
-    # encoding pakotettu: Windowsissa oletus olisi cp1252, joka rikkoo UTF-8:n
     return subprocess.run(komento, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", check=True).stdout
 
@@ -171,18 +184,23 @@ def qwen_kaytettavissa():
 
 
 def kuuntele_qwenilla(tiedosto, kesto, vihjeet):
-    """Qwen2.5-Omni kuuntelee 30 s biisin keskeltä ja kuvailee kuulemansa."""
-    kohta = max(0.0, kesto * 0.4 - QWEN_NAYTE_SEKUNNIT / 2)
+    """Qwen3-Omni kuuntelee koko biisin (tai keskeltä QWEN_MAX_SEKUNNIT
+    sekuntia) ja kirjoittaa siitä proosamuotoisen kuvauksen."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         klippi = tmp.name
     try:
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{kohta:.2f}",
-                        "-t", str(QWEN_NAYTE_SEKUNNIT), "-i", str(tiedosto),
-                        "-ac", "1", "-ar", str(SR), klippi], check=True)
+        komento = ["ffmpeg", "-v", "error", "-y"]
+        if kesto > QWEN_MAX_SEKUNNIT:
+            alku = (kesto - QWEN_MAX_SEKUNNIT) / 2
+            komento += ["-ss", f"{alku:.2f}", "-t", str(QWEN_MAX_SEKUNNIT)]
+        komento += ["-i", str(tiedosto), "-ac", "1", "-ar", str(SR), klippi]
+        subprocess.run(komento, check=True)
         tulos = subprocess.run(
             ["llama-mtmd-cli", "-m", str(QWEN_MALLI), "--mmproj", str(QWEN_MMPROJ),
-             "--audio", klippi, "-p", QWEN_KEHOTE.format(vihjeet=vihjeet),
-             "-n", "300", "--temp", "0.3", "-t", "4"],
+             "-ngl", str(QWEN_GPU_KERROKSET), "--n-cpu-moe", str(QWEN_CPU_MOE),
+             "-c", str(QWEN_KONTEKSTI), "--audio", klippi,
+             "-p", QWEN_KEHOTE.format(vihjeet=vihjeet),
+             "-n", "2000", "--temp", "0.4", "-t", "8"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             check=True, timeout=1800)
         return tulos.stdout.strip()
@@ -229,7 +247,7 @@ def kasittele(tiedosto, genre_malli, tagi_malli, ollama_malli, qwen_ok):
 
     kuvailu = None
     if qwen_ok:
-        print("  Qwen2.5-Omni kuuntelee (kestää muutaman minuutin)...")
+        print("  Qwen3-Omni kuuntelee (kestää pari minuuttia)...")
         vihjeet = ", ".join(f"{n} {p:.0%}" for n, p in genret[:3] if p > 0.10)
         kuvailu = kuuntele_qwenilla(tiedosto, kesto, vihjeet)
         kuvailu = (f"{kuvailu.rstrip('.')}. "

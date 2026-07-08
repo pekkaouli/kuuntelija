@@ -13,6 +13,9 @@
 # Isot mallitiedostot — latauslinkit README:ssä
 mallit/
 
+# Testityötilat
+testi*/
+
 # Python
 .venv/
 __pycache__/
