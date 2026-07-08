@@ -149,6 +149,24 @@ samaan kansioon uudelleen kun sinne ilmestyy uutta musiikkia. Jos
 Qwen-mallit puuttuvat, skripti kirjoittaa silti analyysitiedot (genre,
 tempo, tagit) mutta jättää kuvailun pois.
 
+30B-linjassa on lisäksi eräajoja tukevat liput:
+
+```sh
+python kuuntelija30b.py musiikki --siivu 2/8     # käsittele joka 8. tiedosto
+                                                 # 2:sta alkaen (rinnakkaisajo)
+python kuuntelija30b.py musiikki --vain-suomi    # täydennä suomennokset
+                                                 # valmiisiin raportteihin
+```
+
+## Eräajo CSC:n Puhtilla
+
+Ison musiikkikansion voi ajaa Slurm-eräajona CSC:n Puhti-superkoneella,
+jonka V100-näytönohjaimeen (32 Gt) koko malli mahtuu kerralla —
+`KUUNTELIJA_CPU_MOE=0`-ympäristömuuttujalla. Valmiit sbatch-skriptit
+(yksittäisjobi ja 8 GPU:n array) ja asennusohjeet ovat
+[csc/](csc/)-kansiossa. Suomennos tehdään jälkikäteen omalla koneella
+`--vain-suomi`-lipulla, koska laskentanoodeilla ei ajeta Ollamaa.
+
 ## Optimointi: 30B-malli 12 Gt näytönohjaimella
 
 Qwen3-Omni-30B on MoE-malli (Mixture of Experts): painoja on 30 Gt:n

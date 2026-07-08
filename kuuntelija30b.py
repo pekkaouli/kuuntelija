@@ -21,6 +21,7 @@ Käyttö:
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -49,9 +50,13 @@ QWEN_MAX_SEKUNNIT = 300
 # Mitattu RTX 5070 Ti:llä (12 Gt): 30/48 mahtuu juuri ja koko biisi
 # analysoituu 44 sekunnissa; 24/48 kaatuu muistin loppumiseen. 32 jättää
 # pelivaraa muille ohjelmille. Pelkkä CPU (-ngl 0) veisi 97 s.
-QWEN_GPU_KERROKSET = 99
-QWEN_CPU_MOE = 32
+# Ympäristömuuttujilla voi säätää ilman koodimuutosta — esim. CSC:n
+# eräajossa koko malli mahtuu näytönohjaimeen: KUUNTELIJA_CPU_MOE=0.
+QWEN_GPU_KERROKSET = int(os.environ.get("KUUNTELIJA_GPU_KERROKSET", "99"))
+QWEN_CPU_MOE = int(os.environ.get("KUUNTELIJA_CPU_MOE", "32"))
 QWEN_KONTEKSTI = 8192  # riittää 5 min audiolle + kehotteelle + vastaukselle
+# Slurm kertoo varatut ytimet; muualla oletetaan 8
+QWEN_SAIKEET = int(os.environ.get("SLURM_CPUS_PER_TASK", "8"))
 
 # Prosessimuotoinen arvostelukehote tuottaa ihmismäisempää tekstiä kuin
 # tageja luetteleva prompt, ja koko biisin kuuntelu tuo mukaan rakenteen.
@@ -200,7 +205,7 @@ def kuuntele_qwenilla(tiedosto, kesto, vihjeet):
              "-ngl", str(QWEN_GPU_KERROKSET), "--n-cpu-moe", str(QWEN_CPU_MOE),
              "-c", str(QWEN_KONTEKSTI), "--audio", klippi,
              "-p", QWEN_KEHOTE.format(vihjeet=vihjeet),
-             "-n", "2000", "--temp", "0.4", "-t", "8"],
+             "-n", "2000", "--temp", "0.4", "-t", str(QWEN_SAIKEET)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             check=True, timeout=1800)
         return tulos.stdout.strip()
@@ -293,6 +298,35 @@ def kasittele(tiedosto, genre_malli, tagi_malli, ollama_malli, qwen_ok):
     print(f"  Valmis: {ulos.name}  (genre: {paagenre})")
 
 
+def taydenna_suomeksi(tiedostot, malli):
+    """Jälkikierto: lisää suomenkielinen kuvaus valmiisiin raportteihin.
+    Näin raskaan analyysin voi ajaa esim. laskentakoneella ilman Ollamaa
+    ja suomentaa raportit jälkikäteen omalla koneella."""
+    if not ollama_kaytettavissa(malli):
+        print(f"Ollama tai malli '{malli}' ei vastaa osoitteessa {OLLAMA_URL} "
+              "— suomennosta ei voida tehdä.")
+        return
+    for i, tiedosto in enumerate(tiedostot, 1):
+        raportti = tiedosto.with_suffix(".txt")
+        if not raportti.exists():
+            print(f"Ohitetaan {tiedosto.name} (raporttia ei ole — aja analyysi ensin)")
+            continue
+        teksti = raportti.read_text(encoding="utf-8")
+        if "KUVAUS SUOMEKSI" in teksti:
+            print(f"Ohitetaan {tiedosto.name} (suomennos on jo)")
+            continue
+        print(f"[{i}/{len(tiedostot)}] {tiedosto.name}: kielimalli ({malli}) suomentaa...")
+        try:
+            suomennos = kirjoita_kuvaus_ollamalla(malli, teksti)
+        except Exception as virhe:
+            print(f"  VIRHE: {virhe}", file=sys.stderr)
+            continue
+        raportti.write_text(teksti.rstrip() + "\n\n"
+                            f"KUVAUS SUOMEKSI\n{'-' * 60}\n{suomennos}\n",
+                            encoding="utf-8")
+        print(f"  Valmis: {raportti.name}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Kuuntelee kansion biisit ja kuvailee ne.")
     parser.add_argument("kansio", nargs="?", default=".", help="kansio jossa audiotiedostot")
@@ -300,6 +334,12 @@ def main():
                         help="kirjoita lisäksi suomenkielinen kuvaus Ollamalla")
     parser.add_argument("--malli", default="gemma3:4b", help="Ollama-malli --suomi-kuvausta varten")
     parser.add_argument("--force", action="store_true", help="kirjoita olemassa olevien .txt:iden yli")
+    parser.add_argument("--siivu", metavar="I/M",
+                        help="käsittele vain joka M:s tiedosto alkaen I:nnestä, esim. 2/8 "
+                             "(rinnakkaisia eräajoja, kuten Slurm-arrayta, varten)")
+    parser.add_argument("--vain-suomi", action="store_true",
+                        help="älä analysoi mitään uutta: lisää suomenkielinen kuvaus "
+                             "valmiisiin .txt-raportteihin, joista se puuttuu")
     args = parser.parse_args()
 
     kansio = Path(args.kansio)
@@ -307,6 +347,17 @@ def main():
                        if t.suffix.lower() in AUDIO_PAATTEET)
     if not tiedostot:
         print(f"Ei audiotiedostoja kansiossa {kansio.resolve()}")
+        return
+
+    if args.siivu:
+        # Siivutetaan koko lajitellusta listasta ennen ohituksia, jotta
+        # jako on sama riippumatta siitä mitkä raportit ovat jo valmiina.
+        oma, kaikki = (int(x) for x in args.siivu.split("/"))
+        tiedostot = tiedostot[oma - 1::kaikki]
+        print(f"Siivu {oma}/{kaikki}: {len(tiedostot)} tiedostoa")
+
+    if args.vain_suomi:
+        taydenna_suomeksi(tiedostot, args.malli)
         return
 
     if not args.force:
