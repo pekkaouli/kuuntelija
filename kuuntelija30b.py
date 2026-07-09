@@ -38,10 +38,31 @@ OLLAMA_URL = "http://localhost:11434"
 NAYTE_SEKUNNIT = 12
 SR = 16000
 
-MALLIKANSIO = Path(__file__).resolve().parent / "mallit"
+SKRIPTIKANSIO = Path(__file__).resolve().parent
+MALLIKANSIO = SKRIPTIKANSIO / "mallit"
 QWEN_MALLI = MALLIKANSIO / "Qwen3-Omni-30B-A3B-Instruct-Q4_K_M.gguf"
 # mmproj bf16, ei Q8: kvantisoitu audioenkooderi pilaa musiikin kuuntelun
 QWEN_MMPROJ = MALLIKANSIO / "mmproj-Qwen3-Omni-30B-A3B-Instruct-bf16.gguf"
+
+
+def _etsi_llama_cli():
+    """Paikanna llama-mtmd-cli ilman PATH-riippuvuutta: ensin
+    KUUNTELIJA_LLAMA_CLI-ympäristömuuttuja, sitten PATH (esim. Homebrew),
+    lopuksi skriptin viereen käännetty llama.cpp (CSC:n eräajossa binääri
+    ei ole PATH:ssa)."""
+    ehdokas = os.environ.get("KUUNTELIJA_LLAMA_CLI")
+    if ehdokas and Path(ehdokas).is_file():
+        return ehdokas
+    polulta = shutil.which("llama-mtmd-cli")
+    if polulta:
+        return polulta
+    paikallinen = SKRIPTIKANSIO / "llama.cpp" / "build" / "bin" / "llama-mtmd-cli"
+    if paikallinen.is_file() and os.access(paikallinen, os.X_OK):
+        return str(paikallinen)
+    return None
+
+
+QWEN_CLI = _etsi_llama_cli()
 # Koko biisi annetaan mallille, mutta pisimmistä otetaan keskeltä tämän
 # verran sekunteja, ettei audioenkooderin konteksti kasva liian isoksi.
 QWEN_MAX_SEKUNNIT = 300
@@ -184,8 +205,7 @@ def energia_sanoiksi(piirteet):
 
 
 def qwen_kaytettavissa():
-    return (QWEN_MALLI.exists() and QWEN_MMPROJ.exists()
-            and shutil.which("llama-mtmd-cli") is not None)
+    return QWEN_MALLI.exists() and QWEN_MMPROJ.exists() and QWEN_CLI is not None
 
 
 def kuuntele_qwenilla(tiedosto, kesto, vihjeet):
@@ -201,7 +221,7 @@ def kuuntele_qwenilla(tiedosto, kesto, vihjeet):
         komento += ["-i", str(tiedosto), "-ac", "1", "-ar", str(SR), klippi]
         subprocess.run(komento, check=True)
         tulos = subprocess.run(
-            ["llama-mtmd-cli", "-m", str(QWEN_MALLI), "--mmproj", str(QWEN_MMPROJ),
+            [QWEN_CLI, "-m", str(QWEN_MALLI), "--mmproj", str(QWEN_MMPROJ),
              "-ngl", str(QWEN_GPU_KERROKSET), "--n-cpu-moe", str(QWEN_CPU_MOE),
              "-c", str(QWEN_KONTEKSTI), "--audio", klippi,
              "-p", QWEN_KEHOTE.format(vihjeet=vihjeet),
@@ -370,8 +390,11 @@ def main():
 
     qwen_ok = qwen_kaytettavissa()
     if not qwen_ok:
-        print(f"Huom: Qwen2.5-Omni-mallia ei löydy kansiosta {MALLIKANSIO} "
-              "(tai llama-mtmd-cli puuttuu) — kuvailu jää pois.")
+        syy = ("mallitiedostot puuttuvat kansiosta " + str(MALLIKANSIO)
+               if not (QWEN_MALLI.exists() and QWEN_MMPROJ.exists())
+               else "llama-mtmd-cli ei ratkennut (aseta KUUNTELIJA_LLAMA_CLI "
+                    "tai lisää binääri PATHiin)")
+        print(f"Huom: Qwen-kuvailu jää pois — {syy}.")
 
     ollama_malli = None
     if args.suomi:
