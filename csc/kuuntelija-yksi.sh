@@ -8,7 +8,7 @@
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=10
-#SBATCH --mem=32G
+#SBATCH --mem=48G
 #SBATCH --time=12:00:00
 #SBATCH --output=kuuntelija_%j.out
 
@@ -26,6 +26,13 @@ module load pytorch ffmpeg
 # LD_LIBRARY_PATHiin (eri sonimet kuin cuda/12:lla, ei törmää; torch pyörii
 # tässä CPU:lla). Polun saa: module load gcc/11.3.0 cuda/11.7.0 && echo $CUDA_INSTALL_ROOT
 export LD_LIBRARY_PATH="/appl/spack/v018/install-tree/gcc-11.3.0/cuda-11.7.0-zucvj4/lib64:${LD_LIBRARY_PATH:-}"
+
+# CSC:n pytorch-moduuli on Apptainer-kontti, joka nollaa LD_LIBRARY_PATH:n
+# sisällään. Kontti-python käynnistää llama-mtmd-cli:n kontin sisällä, joten
+# CUDA 11.7:n polku pitää välittää konttiin APPTAINERENV_-etuliitteellä
+# (muuten libcudart.so.11.0 ei löydy → exit 127).
+export APPTAINERENV_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+export SINGULARITYENV_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
 
 export PATH="$TYOTILA/llama.cpp/build/bin:$PATH"
 export HF_HOME=$TYOTILA/hf-cache
